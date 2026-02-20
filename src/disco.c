@@ -36,6 +36,7 @@ void disco_handle_info(session_t *s, xmlNodePtr stanza) {
         "http://jabber.org/protocol/disco#info",
         "http://jabber.org/protocol/disco#items",
         "jabber:iq:roster",
+        "jabber:iq:register",
         "urn:xmpp:delay",
         NULL
     };

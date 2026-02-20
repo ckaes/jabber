@@ -6,6 +6,7 @@
 #include "presence.h"
 #include "message.h"
 #include "disco.h"
+#include "register.h"
 #include "config.h"
 #include "log.h"
 #include "xml.h"
@@ -37,11 +38,22 @@ void stanza_route(session_t *s, xmlNodePtr stanza) {
     log_write(LOG_DEBUG, "Stanza received on fd %d: <%s> ns='%s' state=%d",
               s->fd, name, ns, s->state);
 
-    /* Pre-auth: only SASL allowed */
+    /* Pre-auth: only SASL and in-band registration allowed */
     if (s->state == STATE_STREAM_OPENED && !s->authenticated) {
         if (strcmp(name, "auth") == 0 &&
             strcmp(ns, "urn:ietf:params:xml:ns:xmpp-sasl") == 0) {
             auth_handle_sasl(s, stanza);
+        } else if (strcmp(name, "iq") == 0) {
+            /* Allow registration IQs only */
+            xmlNodePtr child = stanza->children;
+            while (child && child->type != XML_ELEMENT_NODE)
+                child = child->next;
+            const char *cns = (child && child->ns && child->ns->href)
+                              ? (const char *)child->ns->href : "";
+            if (strcmp(cns, "jabber:iq:register") == 0)
+                register_handle_iq(s, stanza);
+            else
+                stanza_send_error(s, stanza, "cancel", "not-allowed");
         } else {
             stream_send_error(s, "not-authorized");
         }
@@ -130,6 +142,8 @@ static void handle_iq(session_t *s, xmlNodePtr stanza) {
         } else {
             disco_handle_items(s, stanza);
         }
+    } else if (strcmp(child_ns, "jabber:iq:register") == 0) {
+        register_handle_iq(s, stanza);
     } else {
         /* Unknown namespace: if addressed to another user, route; else error */
         if (to[0] && !is_server_jid(to) &&

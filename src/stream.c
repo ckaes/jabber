@@ -50,6 +50,7 @@ void stream_handle_open(session_t *s, const char *to, const char *xmlns) {
             "<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
             "<mechanism>PLAIN</mechanism>"
             "</mechanisms>"
+            "<register xmlns='http://jabber.org/features/iq-register'/>"
             "</stream:features>");
         s->state = STATE_STREAM_OPENED;
     }
