@@ -50,6 +50,7 @@ void auth_handle_sasl(session_t *s, xmlNodePtr stanza) {
             "</failure>");
         return;
     }
+    decoded[decoded_len] = '\0'; /* ensure null-terminated for strcmp */
 
     /*
      * SASL PLAIN format: \0authcid\0passwd

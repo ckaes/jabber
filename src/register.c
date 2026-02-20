@@ -82,7 +82,7 @@ void register_handle_iq(session_t *s, xmlNodePtr stanza) {
                 char username[256];
                 snprintf(username, sizeof(username), "%s", s->jid_local);
                 user_delete(username);
-                session_teardown(s);
+                s->teardown_pending = 1;
             }
         } else {
             /* Extract username and password from the query children */

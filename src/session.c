@@ -174,6 +174,14 @@ void session_on_readable(session_t *s) {
         s->parser_reset_pending = 0;
         xml_parser_reset(s);
     }
+
+    /* Handle deferred session teardown (e.g. account removal).
+     * session_teardown must not be called while xmlParseChunk is on the stack
+     * because it frees the XML parser context. */
+    if (s->teardown_pending) {
+        session_flush(s);
+        session_teardown(s);
+    }
 }
 
 void session_on_writable(session_t *s) {
