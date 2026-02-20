@@ -59,7 +59,10 @@ void stream_handle_open(session_t *s, const char *to, const char *xmlns) {
 void stream_handle_close(session_t *s) {
     log_write(LOG_DEBUG, "Stream close from fd %d", s->fd);
     session_write_str(s, "</stream:stream>");
-    session_teardown(s);
+    if (s->in_xml_parse)
+        s->teardown_pending = 1;
+    else
+        session_teardown(s);
 }
 
 void stream_send_error(session_t *s, const char *condition) {
@@ -72,5 +75,8 @@ void stream_send_error(session_t *s, const char *condition) {
         condition);
     session_write_str(s, buf);
     session_flush(s);
-    session_teardown(s);
+    if (s->in_xml_parse)
+        s->teardown_pending = 1;
+    else
+        session_teardown(s);
 }

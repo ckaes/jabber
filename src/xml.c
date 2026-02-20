@@ -186,9 +186,12 @@ static void on_structured_error(void *ctx, xmlErrorPtr error) {
     log_write(LOG_WARN, "XML parse error on fd %d: %s",
               s->fd, error->message ? error->message : "(unknown)");
 
-    /* Will be handled as a stream error in later phases.
-     * For now, just tear down the session. */
-    session_teardown(s);
+    /* Defer teardown if called from within a SAX callback (xmlParseChunk is
+     * on the stack); freeing the parser context now would be use-after-free. */
+    if (s->in_xml_parse)
+        s->teardown_pending = 1;
+    else
+        session_teardown(s);
 }
 
 /* --- Public API --- */

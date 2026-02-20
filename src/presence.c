@@ -56,7 +56,7 @@ static void presence_handle_available(session_t *s, xmlNodePtr stanza) {
         char bare[512];
         jid_bare(local, domain, bare, sizeof(bare));
         session_t *contact = session_find_by_jid(bare);
-        if (contact && contact->available) {
+        if (contact) {
             stanza_send(contact, s->presence_stanza);
         }
     }

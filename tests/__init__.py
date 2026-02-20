@@ -1,0 +1,1 @@
+# XMPP integration test suite

@@ -58,6 +58,7 @@ typedef struct session {
     int authenticated;
     int parser_reset_pending;   /* set by auth to defer parser reset */
     int teardown_pending;       /* set to defer session_teardown past xmlParseChunk */
+    int in_xml_parse;           /* non-zero while xmlParseChunk is on the call stack */
 
     /* Presence */
     int        available;

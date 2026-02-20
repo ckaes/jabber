@@ -163,7 +163,9 @@ void session_on_readable(session_t *s) {
 
     /* Feed to XML parser if initialized */
     if (s->xml_ctx) {
+        s->in_xml_parse = 1;
         xmlParseChunk(s->xml_ctx, s->read_buf, (int)s->read_len, 0);
+        s->in_xml_parse = 0;
         s->read_len = 0;
     }
 

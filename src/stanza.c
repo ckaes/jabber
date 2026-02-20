@@ -35,8 +35,8 @@ void stanza_route(session_t *s, xmlNodePtr stanza) {
     const char *name = (const char *)stanza->name;
     const char *ns = stanza->ns ? (const char *)stanza->ns->href : "";
 
-    log_write(LOG_DEBUG, "Stanza received on fd %d: <%s> ns='%s' state=%d",
-              s->fd, name, ns, s->state);
+    log_write(LOG_DEBUG, "Stanza received on fd %d: <%s> ns='%s' state=%d presence_stanza=%p",
+              s->fd, name, ns, s->state, (void *)s->presence_stanza);
 
     /* Pre-auth: only SASL and in-band registration allowed */
     if (s->state == STATE_STREAM_OPENED && !s->authenticated) {

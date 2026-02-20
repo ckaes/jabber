@@ -58,8 +58,8 @@ void handle_message(session_t *s, xmlNodePtr stanza) {
     jid_bare(local, domain, bare, sizeof(bare));
     session_t *target = session_find_by_jid(bare);
 
-    if (target && target->available) {
-        /* Deliver immediately */
+    if (target) {
+        /* Deliver immediately to connected user */
         stanza_send(target, stanza);
     } else if (strcmp(type, "error") != 0) {
         /* Store offline (for chat/normal, never for error) */
