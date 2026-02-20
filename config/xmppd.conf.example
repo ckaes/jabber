@@ -1,0 +1,19 @@
+# xmppd.conf — XMPP server configuration
+
+# Server domain for JIDs
+domain = localhost
+
+# TCP listen port
+port = 5222
+
+# Listen address
+bind_address = 0.0.0.0
+
+# Directory for user data files
+datadir = ./data
+
+# Log file path
+logfile = ./xmppd.log
+
+# Log level: DEBUG, INFO, WARN, ERROR
+loglevel = INFO

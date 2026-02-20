@@ -1,0 +1,982 @@
+# XMPP IM & Presence Server — Prototype Specification
+
+## 1. Overview
+
+A minimal XMPP Instant Messaging and Presence server implemented in C, targeting compatibility with Pidgin. Implements a subset of RFC 6120 (Core) and RFC 6121 (IM & Presence) plus minimal XEP-0030 (Service Discovery). Designed as a prototype for a small number of concurrent users (≤10), intended to be extended over time.
+
+---
+
+## 2. Project Structure
+
+```
+xmppd/
+├── Makefile
+├── README.md
+├── config/
+│   └── xmppd.conf.example
+├── include/
+│   ├── server.h
+│   ├── stream.h
+│   ├── stanza.h
+│   ├── session.h
+│   ├── auth.h
+│   ├── roster.h
+│   ├── presence.h
+│   ├── message.h
+│   ├── disco.h
+│   ├── user.h
+│   ├── config.h
+│   ├── log.h
+│   ├── xml.h
+│   └── util.h
+├── src/
+│   ├── main.c
+│   ├── server.c
+│   ├── stream.c
+│   ├── stanza.c
+│   ├── session.c
+│   ├── auth.c
+│   ├── roster.c
+│   ├── presence.c
+│   ├── message.c
+│   ├── disco.c
+│   ├── user.c
+│   ├── config.c
+│   ├── log.c
+│   └── xml.c
+├── tools/
+│   ├── Makefile
+│   └── useradd.c
+└── data/
+    └── (runtime user data files)
+```
+
+---
+
+## 3. Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| **libxml2** | Streaming XML parsing (SAX/push parser) and DOM tree construction for stanza representation and outbound XML serialization |
+| **POSIX libc** | Sockets, poll(), file I/O, strings |
+
+No TLS library required.
+
+---
+
+## 4. Build System
+
+- GNU Makefile
+- Targets:
+  - `make` / `make all` — build `xmppd` server binary and `useradd` tool
+  - `make xmppd` — build server only
+  - `make useradd` — build user provisioning tool only
+  - `make clean` — remove build artifacts
+  - `make install` — optional, install to prefix
+- Compiler: `gcc` or `cc`, with `-Wall -Wextra -pedantic`
+- Use `xml2-config --cflags` and `xml2-config --libs` for libxml2 compiler and linker flags
+- Support `CFLAGS`, `LDFLAGS`, `PREFIX` overrides
+
+---
+
+## 5. Configuration
+
+### 5.1 Config File Format
+
+Simple `key = value` text file, one entry per line. Lines beginning with `#` are comments.
+
+```ini
+# xmppd.conf
+domain = localhost
+port = 5222
+datadir = ./data
+logfile = ./xmppd.log
+loglevel = DEBUG
+```
+
+### 5.2 Configuration Keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `domain` | string | `localhost` | Server domain for JIDs |
+| `port` | integer | `5222` | TCP listen port |
+| `bind_address` | string | `0.0.0.0` | Listen address |
+| `datadir` | path | `./data` | Directory for user data files |
+| `logfile` | path | `./xmppd.log` | Log file path |
+| `loglevel` | enum | `INFO` | One of: `DEBUG`, `INFO`, `WARN`, `ERROR` |
+
+### 5.3 Command-Line Arguments
+
+```
+Usage: xmppd [options]
+  -c, --config <path>     Path to config file (default: ./xmppd.conf)
+  -d, --domain <domain>   Server domain (overrides config)
+  -p, --port <port>       Listen port (overrides config)
+  -D, --datadir <path>    Data directory (overrides config)
+  -l, --logfile <path>    Log file path (overrides config)
+  -L, --loglevel <level>  Log level (overrides config)
+  -h, --help              Show usage
+```
+
+Command-line arguments override config file values. Config file values override defaults.
+
+---
+
+## 6. Logging
+
+### 6.1 Log Levels
+
+| Level | Value | Usage |
+|-------|-------|-------|
+| `DEBUG` | 0 | XML traffic, state transitions, internal detail |
+| `INFO` | 1 | Client connects/disconnects, authentication, session events |
+| `WARN` | 2 | Recoverable errors, malformed stanzas, unexpected client behavior |
+| `ERROR` | 3 | Fatal errors, system call failures |
+
+### 6.2 Log Format
+
+```
+[2025-01-15 14:32:01] [INFO] Client connected from 127.0.0.1:54321
+[2025-01-15 14:32:01] [DEBUG] <-- <stream:stream xmlns='jabber:client' ...>
+[2025-01-15 14:32:01] [DEBUG] --> <stream:stream xmlns='jabber:client' ...>
+```
+
+### 6.3 Behavior
+
+- Output goes to the configured log file
+- Log file is opened in append mode
+- Only messages at or above the configured `loglevel` are written
+- At `DEBUG` level, full XML stanzas sent/received are logged (with `<--` for inbound and `-->` for outbound prefixes)
+
+---
+
+## 7. User Data Storage
+
+### 7.1 Directory Layout
+
+```
+data/
+├── alice/
+│   ├── user.conf
+│   ├── roster.xml
+│   └── offline/
+│       ├── 0001.xml
+│       └── 0002.xml
+├── bob/
+│   ├── user.conf
+│   ├── roster.xml
+│   └── offline/
+```
+
+### 7.2 user.conf
+
+Plain text, key=value:
+
+```ini
+password = secret123
+```
+
+Only stores the password for this prototype. Extensible for future fields.
+
+### 7.3 roster.xml
+
+```xml
+<roster>
+  <item jid="bob@localhost" name="Bob" subscription="both"/>
+  <item jid="carol@localhost" name="Carol" subscription="from" ask="subscribe"/>
+</roster>
+```
+
+Roster item attributes:
+- `jid` — bare JID of the contact (required)
+- `name` — display name (optional)
+- `subscription` — one of: `none`, `to`, `from`, `both`, `remove` (required)
+- `ask` — if present, value is `subscribe` (indicates pending outbound subscription request)
+
+### 7.4 Offline Messages
+
+Each offline message is stored as a separate XML file in the user's `offline/` directory, named with a zero-padded sequential integer (e.g., `0001.xml`). The file contains the complete `<message>` stanza as it would be delivered, with a `<delay>` element (XEP-0203) added to indicate when the message was originally received by the server:
+
+```xml
+<message from="bob@localhost/pidgin" to="alice@localhost" type="chat">
+  <body>Hey, are you there?</body>
+  <delay xmlns="urn:xmpp:delay" from="localhost" stamp="2025-01-15T14:32:01Z"/>
+</message>
+```
+
+---
+
+## 8. User Provisioning Tool
+
+### 8.1 Usage
+
+```
+Usage: useradd -d <datadir> -u <username> -p <password> [-D <domain>]
+  -d, --datadir <path>     Data directory
+  -u, --user <username>    Username (localpart of JID)
+  -p, --password <pass>    Password in plain text
+  -D, --domain <domain>    Domain (for display/validation only, default: localhost)
+```
+
+### 8.2 Behavior
+
+1. Validate that the username contains only allowed characters (alphanumeric, `.`, `-`, `_`)
+2. Create `<datadir>/<username>/` directory
+3. Create `<datadir>/<username>/user.conf` with the password
+4. Create `<datadir>/<username>/roster.xml` with an empty `<roster/>`
+5. Create `<datadir>/<username>/offline/` directory
+6. Print confirmation: `User '<username>@<domain>' created successfully.`
+7. If the user directory already exists, print an error and exit with non-zero status
+
+---
+
+## 9. Network Layer
+
+### 9.1 Server Socket
+
+- Create a TCP socket, bind to `bind_address:port`
+- Set `SO_REUSEADDR`
+- Listen with a small backlog (e.g., 16)
+- Set listening socket to non-blocking
+
+### 9.2 I/O Multiplexing
+
+- Use `poll()` for all I/O multiplexing
+- Maintain a `struct pollfd` array covering:
+  - The listening socket (index 0)
+  - One entry per connected client
+- Poll timeout: 1000ms (allows periodic housekeeping)
+- On `POLLIN` for the listener: accept new connection, set non-blocking, add to poll set
+- On `POLLIN` for a client: read available data into the client's read buffer, feed to XML parser
+- On `POLLOUT` for a client: flush the client's write buffer
+- On `POLLERR`/`POLLHUP`: tear down the client session
+
+### 9.3 Client Buffers
+
+Each connected client has:
+- A **read buffer** (fixed 8192 bytes) for accumulating inbound TCP data
+- A **write buffer** (dynamically grown, initial 8192 bytes) for queuing outbound XML
+- When the write buffer has data, set `POLLOUT` on the client's pollfd entry; when drained, clear it
+
+---
+
+## 10. Session Management
+
+### 10.1 Session States
+
+Each client connection progresses through a linear state machine:
+
+```
+CONNECTED → STREAM_OPENED → AUTHENTICATED → BOUND → SESSION_ACTIVE → DISCONNECTED
+```
+
+| State | Description |
+|-------|-------------|
+| `CONNECTED` | TCP connection accepted, waiting for `<stream:stream>` |
+| `STREAM_OPENED` | Stream header exchanged, features advertised, waiting for auth |
+| `AUTHENTICATED` | SASL PLAIN succeeded, waiting for stream restart |
+| `BOUND` | Resource bound, waiting for session establishment |
+| `SESSION_ACTIVE` | Fully established, processing stanzas |
+| `DISCONNECTED` | Session torn down |
+
+### 10.2 Session Data Structure
+
+```c
+typedef struct session {
+    int fd;                         // Client socket file descriptor
+    int state;                      // Session state enum
+    char read_buf[8192];            // Inbound TCP buffer
+    size_t read_len;                // Bytes in read buffer
+    char *write_buf;                // Outbound buffer (dynamic)
+    size_t write_len;               // Bytes in write buffer
+    size_t write_cap;               // Write buffer capacity
+    char jid_local[256];            // Localpart (username)
+    char jid_domain[256];           // Domain
+    char jid_resource[256];         // Resource
+    xmlParserCtxtPtr xml_ctx;       // libxml2 push parser context
+    xmlNodePtr current_stanza;      // DOM node being built for current stanza
+    int stanza_depth;               // XML element depth counter
+    int available;                  // Whether the user has sent initial presence
+    xmlNodePtr presence_stanza;     // Last broadcast presence (show/status/priority)
+} session_t;
+```
+
+### 10.3 Multiple Sessions / Conflict
+
+- Only one active session per bare JID (`user@domain`) is allowed
+- If a user authenticates while already having an active session, the **old session** is terminated with a `<conflict/>` stream error, and the **new session** proceeds
+- On disconnect (clean `</stream:stream>` or TCP drop), the session is removed and presence `unavailable` is broadcast
+
+---
+
+## 11. XML Processing
+
+### 11.1 libxml2 Push Parser for Streaming XML
+
+Each session uses a **libxml2 push parser** (`xmlCreatePushParserCtxt()`) operating in **SAX mode**. This allows incremental feeding of TCP data chunks to the parser, which invokes SAX callbacks as XML elements are parsed — the same streaming pattern needed for XMPP's persistent XML stream.
+
+A `xmlSAXHandler` struct is configured with the following callbacks:
+
+- **startElementNs** (SAX2 namespace-aware start element):
+  - At depth 0: this is the `<stream:stream>` element. Extract attributes (`to`, `xmlns`, `version`). Do **not** build a DOM node. Trigger stream opening logic. Increment `stanza_depth`.
+  - At depth 1: this is the root of a new stanza. Create a new `xmlNode` via `xmlNewNode()` / `xmlNewNs()`, set element name, namespace, and attributes. Store in `session->current_stanza`. Increment `stanza_depth`.
+  - At depth > 1: create a new `xmlNode`, set element name, namespace, and attributes. Add as a child of the current deepest node. Increment `stanza_depth`.
+
+- **endElementNs** (SAX2 namespace-aware end element):
+  - Decrement `stanza_depth`.
+  - At depth returning to 0: client sent `</stream:stream>` — initiate clean shutdown.
+  - At depth returning to 1: stanza is complete. The DOM tree rooted at `session->current_stanza` is dispatched to the stanza router. After dispatch, free the DOM tree with `xmlFreeNode()` and set `current_stanza` to NULL.
+
+- **characters** (character data):
+  - If currently building a stanza (`stanza_depth` ≥ 1), append text content to the current deepest DOM node using `xmlNodeAddContentLen()`.
+
+### 11.2 Push Parser Feeding
+
+When TCP data is read into the session's read buffer, feed it to the push parser with:
+
+```c
+xmlParseChunk(session->xml_ctx, session->read_buf, bytes_read, 0);
+```
+
+The SAX callbacks fire synchronously during `xmlParseChunk()`, building DOM nodes and dispatching complete stanzas.
+
+### 11.3 Parser Reset on Stream Restart
+
+After successful SASL authentication, the client sends a new `<stream:stream>`. The libxml2 push parser must be freed (`xmlFreeParserCtxt()`) and recreated (`xmlCreatePushParserCtxt()`) to handle the new stream from a clean state. Reset `stanza_depth` to 0 and `current_stanza` to NULL.
+
+### 11.4 SAX Context Pointer
+
+The `xmlCreatePushParserCtxt()` accepts a user-data pointer which is passed to all SAX callbacks. Set this to the `session_t*` so that callbacks can access session state, invoke stanza dispatch, and queue outbound data.
+
+### 11.5 DOM Node Tracking During SAX Parsing
+
+Maintain a pointer to the "current node" being built within the SAX callbacks:
+- On `startElementNs`: create a new node. If `stanza_depth == 1`, it becomes `current_stanza` and also the current node. If `stanza_depth > 1`, add as child of current node, then the new node becomes the current node.
+- On `endElementNs`: if `stanza_depth > 1`, move the current node pointer back to its parent (`current_node = current_node->parent`).
+- On `characters`: add text to the current node.
+
+This effectively builds a libxml2 DOM tree incrementally via SAX events.
+
+### 11.6 Outbound: libxml2 Serialization
+
+- Construct outbound stanzas by building libxml2 DOM trees using the standard `xmlNewNode()`, `xmlNewChild()`, `xmlNewProp()`, `xmlNewText()` APIs
+- Serialize to string using `xmlNodeDump()` with an `xmlBuffer`
+- Write serialized XML bytes into the session's write buffer
+- Special case: `<stream:stream>` opening tag and `</stream:stream>` closing tag are written as raw strings (they are not well-formed standalone XML documents)
+- Free serialization buffers after copying to the write buffer
+
+### 11.7 libxml2 Initialization and Cleanup
+
+- Call `xmlInitParser()` once at server startup
+- Call `xmlCleanupParser()` once at server shutdown
+- Call `xmlMemoryDump()` at shutdown in debug builds to detect leaks
+
+---
+
+## 12. XMPP Stream Setup (RFC 6120)
+
+### 12.1 Stream Opening
+
+**Client sends:**
+```xml
+<?xml version='1.0'?>
+<stream:stream to='localhost' xmlns='jabber:client'
+  xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>
+```
+
+**Server responds:**
+```xml
+<?xml version='1.0'?>
+<stream:stream from='localhost' id='UNIQUE_STREAM_ID'
+  xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'
+  version='1.0'>
+```
+
+- `id` is a random alphanumeric string (e.g., 16 characters)
+- The `to` attribute from the client must match the server's configured domain; if not, respond with `<host-unknown/>` stream error and close
+
+### 12.2 Stream Features (Pre-Auth)
+
+Immediately after the stream opening response:
+
+```xml
+<stream:features>
+  <mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>
+    <mechanism>PLAIN</mechanism>
+  </mechanisms>
+</stream:features>
+```
+
+### 12.3 Stream Features (Post-Auth)
+
+After SASL success and stream restart:
+
+```xml
+<stream:features>
+  <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>
+  <session xmlns='urn:ietf:params:xml:ns:xmpp-session'>
+    <optional/>
+  </session>
+</stream:features>
+```
+
+### 12.4 Stream Errors
+
+When a stream-level error occurs, send the error and close:
+
+```xml
+<stream:error>
+  <ERROR_CONDITION xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>
+</stream:error>
+</stream:stream>
+```
+
+Supported stream error conditions:
+| Condition | When Used |
+|-----------|-----------|
+| `<host-unknown/>` | Client `to` attribute doesn't match server domain |
+| `<not-authorized/>` | Client attempts stanzas before authentication |
+| `<conflict/>` | New session replaces existing session for same bare JID |
+| `<invalid-xml/>` | XML parsing error from libxml2 |
+| `<not-well-formed/>` | XML structural violation |
+| `<policy-violation/>` | Read buffer overflow, stanza too large |
+
+After sending a stream error, close the TCP connection.
+
+---
+
+## 13. Authentication (RFC 6120 SASL)
+
+### 13.1 SASL PLAIN Only
+
+The server supports only SASL PLAIN (`RFC 4616`). The mechanism transmits credentials as a base64-encoded string of `\0authcid\0passwd`.
+
+### 13.2 Auth Flow
+
+**Client sends:**
+```xml
+<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>
+  BASE64_ENCODED_CREDENTIALS
+</auth>
+```
+
+**Server decodes the base64 payload**, extracting:
+- `authzid` (authorization identity — ignored in this prototype)
+- `authcid` (authentication identity — the username)
+- `passwd` (the password)
+
+**Server validates:**
+1. Look up `<datadir>/<authcid>/user.conf`
+2. Compare `passwd` against stored password
+3. If valid: respond with `<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>`
+4. If invalid (user not found or wrong password): respond with:
+```xml
+<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>
+  <not-authorized/>
+</failure>
+```
+
+After `<success/>`, the client will open a new stream (stream restart). The server must reset the push parser and expect a new `<stream:stream>`.
+
+### 13.3 Base64 Decoding
+
+Implement a small base64 decode function (no external dependency needed) or use a minimal embedded implementation. Only decoding is needed for auth; encoding is not required for SASL but may be useful as a utility.
+
+---
+
+## 14. Resource Binding (RFC 6120)
+
+### 14.1 Bind Request
+
+**Client sends:**
+```xml
+<iq type='set' id='bind_1'>
+  <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>
+    <resource>pidgin</resource>
+  </bind>
+</iq>
+```
+
+Or without a resource (server should generate one):
+```xml
+<iq type='set' id='bind_1'>
+  <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>
+</iq>
+```
+
+### 14.2 Server Response
+
+If the client provides a resource, use it. If not, generate one (e.g., a random 8-character alphanumeric string).
+
+**Success:**
+```xml
+<iq type='result' id='bind_1'>
+  <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>
+    <jid>alice@localhost/pidgin</jid>
+  </bind>
+</iq>
+```
+
+Store the full JID in the session. Transition state to `BOUND`.
+
+---
+
+## 15. Session Establishment (Deprecated but Required for Pidgin)
+
+### 15.1 Session Request
+
+**Client sends:**
+```xml
+<iq type='set' id='sess_1'>
+  <session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>
+</iq>
+```
+
+### 15.2 Server Response
+
+```xml
+<iq type='result' id='sess_1'/>
+```
+
+Transition state to `SESSION_ACTIVE`.
+
+---
+
+## 16. Stanza Routing
+
+### 16.1 Stanza Router
+
+Once a session is in `SESSION_ACTIVE` state, incoming stanzas are dispatched based on type:
+
+```
+stanza_route(session, stanza):
+  if stanza is <iq>:       → handle_iq(session, stanza)
+  if stanza is <message>:  → handle_message(session, stanza)
+  if stanza is <presence>: → handle_presence(session, stanza)
+  else:                    → send <unsupported-stanza-type/> stream error
+```
+
+### 16.2 Addressing Rules
+
+- If a stanza has a `to` attribute with the server's domain and no localpart (e.g., `to='localhost'`), it is addressed to the **server itself** (handle locally — relevant for disco, etc.)
+- If a stanza has a `to` attribute with a bare or full JID at the server's domain, route to the **target user**
+- If a stanza has no `to` attribute, it is treated as addressed to the **server** (for presence) or as **implicit self-addressing** per the relevant RFC rules
+
+---
+
+## 17. Roster Management (RFC 6121)
+
+### 17.1 Roster Get
+
+**Client sends:**
+```xml
+<iq type='get' id='roster_1'>
+  <query xmlns='jabber:iq:roster'/>
+</iq>
+```
+
+**Server responds** with the user's roster loaded from `roster.xml`:
+```xml
+<iq type='result' id='roster_1'>
+  <query xmlns='jabber:iq:roster'>
+    <item jid='bob@localhost' name='Bob' subscription='both'/>
+  </query>
+</iq>
+```
+
+Ignore any `ver` attribute on the `<query>` element. Always send the full roster.
+
+### 17.2 Roster Set (Add/Update Contact)
+
+**Client sends:**
+```xml
+<iq type='set' id='roster_2'>
+  <query xmlns='jabber:iq:roster'>
+    <item jid='carol@localhost' name='Carol'/>
+  </query>
+</iq>
+```
+
+**Server:**
+1. Update or add the item in the user's in-memory roster and persist to `roster.xml`
+2. Respond with:
+```xml
+<iq type='result' id='roster_2'/>
+```
+3. Send a **roster push** to the same client (since single-resource):
+```xml
+<iq type='set' id='SERVER_GENERATED_ID'>
+  <query xmlns='jabber:iq:roster'>
+    <item jid='carol@localhost' name='Carol' subscription='none'/>
+  </query>
+</iq>
+```
+
+### 17.3 Roster Remove
+
+**Client sends:**
+```xml
+<iq type='set' id='roster_3'>
+  <query xmlns='jabber:iq:roster'>
+    <item jid='carol@localhost' subscription='remove'/>
+  </query>
+</iq>
+```
+
+**Server:**
+1. Remove the item from the roster, persist
+2. Cancel any subscriptions in both directions (see §18)
+3. Respond with result and roster push showing the removed item with `subscription='remove'`
+
+---
+
+## 18. Presence (RFC 6121)
+
+### 18.1 Initial Presence
+
+When a client sends an initial presence stanza (presence with no `type` attribute and no `to` attribute):
+
+```xml
+<presence>
+  <show>chat</show>
+  <status>Ready to chat!</status>
+  <priority>0</priority>
+</presence>
+```
+
+**Server:**
+1. Mark the session as "available"
+2. Store the presence stanza data (show, status, priority) in the session
+3. Broadcast this presence to all contacts in the user's roster that have a subscription of `from` or `both` (i.e., contacts who are authorized to see this user's presence), but only if those contacts are currently online
+4. For each contact in the roster with subscription `to` or `both` (contacts whose presence this user is authorized to see), if they are online, send their current presence to this user
+5. Deliver any stored offline messages (see §19.3), then delete the offline message files
+
+### 18.2 Subsequent Presence Updates
+
+Same as initial presence — broadcast updated presence to subscribed+online contacts.
+
+### 18.3 Unavailable Presence
+
+Sent explicitly by the client or generated by the server on disconnect:
+
+```xml
+<presence type='unavailable'/>
+```
+
+**Server:**
+1. Broadcast `<presence type='unavailable' from='user@domain/resource'/>` to all contacts with subscription `from` or `both` who are online
+2. Mark session as unavailable
+
+### 18.4 Presence Subscriptions
+
+#### Subscribe Request
+
+**Client sends:**
+```xml
+<presence to='bob@localhost' type='subscribe'/>
+```
+
+**Server (acting on behalf of the sender):**
+1. Update sender's roster: set `ask='subscribe'` on the item for `bob@localhost` (create the item with `subscription='none'` if it doesn't exist). Persist.
+2. Roster push to sender showing updated item.
+3. If `bob` is online, deliver the `<presence type='subscribe' from='alice@localhost'/>` to bob's session.
+4. If `bob` is offline, the subscribe request is **not stored** (per RFC 6121, the server should re-deliver on the contact's next login). Store a flag or note in the sender's roster that the request is pending (the `ask='subscribe'` attribute).
+
+**On bob's next login (if he was offline):** when bob comes online, the server checks all local users' rosters. For any roster entry pointing at bob that has `ask='subscribe'` and a subscription that does not already include the inbound direction, re-deliver `<presence type='subscribe'>` to bob.
+
+#### Subscribed (Approve)
+
+**Bob's client sends:**
+```xml
+<presence to='alice@localhost' type='subscribed'/>
+```
+
+**Server (acting on behalf of bob):**
+1. Update bob's roster item for alice: if subscription was `none`, set to `from`. If `to`, set to `both`. Persist. Roster push to bob.
+2. Update alice's roster item for bob: if subscription was `none`, set to `to`. If `from`, set to `both`. Remove `ask='subscribe'`. Persist.
+3. If alice is online: roster push to alice, then send bob's current presence to alice.
+4. Deliver `<presence type='subscribed' from='bob@localhost'/>` to alice (if online).
+
+#### Unsubscribe
+
+**Client sends:**
+```xml
+<presence to='bob@localhost' type='unsubscribe'/>
+```
+
+**Server:**
+1. Update sender's roster: if subscription was `to`, set to `none`. If `both`, set to `from`. Remove `ask`. Persist. Roster push to sender.
+2. Update bob's roster: if subscription was `from`, set to `none`. If `both`, set to `to`. Persist.
+3. If bob is online: roster push to bob, deliver `<presence type='unsubscribe'>`, and send `<presence type='unavailable'>` from the sender.
+
+#### Unsubscribed (Deny/Revoke)
+
+**Client sends:**
+```xml
+<presence to='alice@localhost' type='unsubscribed'/>
+```
+
+**Server:**
+1. Update sender's roster: if subscription was `from`, set to `none`. If `both`, set to `to`. Persist. Roster push to sender.
+2. Update alice's roster: if subscription was `to`, set to `none`. If `both`, set to `from`. Remove `ask`. Persist.
+3. If alice is online: roster push to alice, deliver `<presence type='unsubscribed'>`, and send `<presence type='unavailable'>` from the sender.
+
+### 18.5 Presence Elements
+
+The server must correctly pass through these child elements of `<presence>`:
+
+| Element | Description |
+|---------|-------------|
+| `<show>` | `away`, `chat`, `dnd`, `xa` |
+| `<status>` | Human-readable status text |
+| `<priority>` | Integer, not used for routing (single resource) but stored and relayed |
+
+---
+
+## 19. Messaging (RFC 6121)
+
+### 19.1 Message Routing — Recipient Online
+
+**Client sends:**
+```xml
+<message to='bob@localhost' type='chat' id='msg_1'>
+  <body>Hello Bob!</body>
+</message>
+```
+
+**Server:**
+1. Verify the `to` JID is at the server's domain
+2. Look up bob's active session
+3. If bob is online and available: deliver the message, setting `from` to the sender's full JID:
+```xml
+<message from='alice@localhost/pidgin' to='bob@localhost' type='chat' id='msg_1'>
+  <body>Hello Bob!</body>
+</message>
+```
+
+### 19.2 Message Routing — Recipient Offline (type=chat or type=normal)
+
+If the recipient has no active session:
+1. Store the message as a file in `<datadir>/<username>/offline/NNNN.xml`
+2. Add a `<delay>` element per XEP-0203:
+```xml
+<delay xmlns='urn:xmpp:delay' from='localhost'
+  stamp='2025-01-15T14:32:01Z'/>
+```
+3. Use the next available sequential filename
+
+### 19.3 Offline Message Delivery
+
+When a user sends initial presence (comes online):
+1. Scan their `offline/` directory for `*.xml` files
+2. Sort by filename (numeric order)
+3. Deliver each message to the now-online session
+4. Delete the offline message files after successful delivery
+
+### 19.4 Message to Unknown User
+
+If the `to` JID localpart does not correspond to any user directory in `datadir`, respond with a stanza error:
+
+```xml
+<message from='localhost' to='alice@localhost/pidgin' type='error' id='msg_1'>
+  <error type='cancel'>
+    <item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
+  </error>
+</message>
+```
+
+### 19.5 Message Types Handled
+
+| Type | Behavior |
+|------|----------|
+| `chat` | Route to recipient, store offline if unavailable |
+| `normal` | Same as `chat` |
+| `error` | Deliver if recipient online, never store offline, never generate an error in response to an error |
+
+---
+
+## 20. IQ Stanza Handling
+
+### 20.1 IQ Types
+
+| Type | Description |
+|------|-------------|
+| `get` | Request for information |
+| `set` | Request to perform an action |
+| `result` | Success response (routed to recipient, not handled by server) |
+| `error` | Error response (routed to recipient, not handled by server) |
+
+### 20.2 IQ Routing
+
+- `type='get'` or `type='set'` addressed to the server (no `to`, or `to` is the server domain): handle locally
+- `type='get'` or `type='set'` addressed to a local user: deliver to that user if online, otherwise return `<service-unavailable/>`
+- `type='result'` or `type='error'`: route to the addressed user if online; drop if offline
+- Unknown namespace on a `get`/`set` addressed to the server: respond with `<service-unavailable/>`
+
+### 20.3 Known IQ Namespaces (Handled by Server)
+
+| Namespace | Handler |
+|-----------|---------|
+| `urn:ietf:params:xml:ns:xmpp-bind` | Resource binding (§14) |
+| `urn:ietf:params:xml:ns:xmpp-session` | Session establishment (§15) |
+| `jabber:iq:roster` | Roster operations (§17) |
+| `http://jabber.org/protocol/disco#info` | Service discovery info (§21) |
+| `http://jabber.org/protocol/disco#items` | Service discovery items (§21) |
+
+---
+
+## 21. Service Discovery (XEP-0030)
+
+### 21.1 disco#info Response
+
+**Client sends:**
+```xml
+<iq type='get' to='localhost' id='disco_1'>
+  <query xmlns='http://jabber.org/protocol/disco#info'/>
+</iq>
+```
+
+**Server responds:**
+```xml
+<iq type='result' from='localhost' to='alice@localhost/pidgin' id='disco_1'>
+  <query xmlns='http://jabber.org/protocol/disco#info'>
+    <identity category='server' type='im' name='xmppd'/>
+    <feature var='http://jabber.org/protocol/disco#info'/>
+    <feature var='http://jabber.org/protocol/disco#items'/>
+    <feature var='jabber:iq:roster'/>
+    <feature var='urn:xmpp:delay'/>
+  </query>
+</iq>
+```
+
+### 21.2 disco#items Response
+
+**Client sends:**
+```xml
+<iq type='get' to='localhost' id='disco_2'>
+  <query xmlns='http://jabber.org/protocol/disco#items'/>
+</iq>
+```
+
+**Server responds** with an empty items list (no sub-services):
+```xml
+<iq type='result' from='localhost' to='alice@localhost/pidgin' id='disco_2'>
+  <query xmlns='http://jabber.org/protocol/disco#items'/>
+</iq>
+```
+
+---
+
+## 22. Stanza Error Handling
+
+### 22.1 Stanza Error Format
+
+```xml
+<iq type='error' id='ORIGINAL_ID' from='localhost' to='SENDER_JID'>
+  <error type='ERROR_TYPE'>
+    <CONDITION xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
+  </error>
+</iq>
+```
+
+### 22.2 Supported Stanza Error Conditions
+
+| Condition | Type | When Used |
+|-----------|------|-----------|
+| `<bad-request/>` | `modify` | Malformed stanza (missing required attributes) |
+| `<item-not-found/>` | `cancel` | Message to non-existent user |
+| `<service-unavailable/>` | `cancel` | IQ to unrecognized namespace, IQ to offline user |
+| `<not-allowed/>` | `cancel` | Operation not permitted in current state |
+| `<jid-malformed/>` | `modify` | Invalid JID in `to` attribute |
+| `<feature-not-implemented/>` | `cancel` | Recognized namespace but unsupported operation |
+| `<internal-server-error/>` | `wait` | Unexpected server-side failure |
+
+---
+
+## 23. Graceful Shutdown
+
+- On `SIGINT` or `SIGTERM`:
+  1. Stop accepting new connections
+  2. For each active session, send `<stream:error><system-shutdown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error></stream:stream>` and close
+  3. Clean up all resources
+  4. Close log file
+  5. Exit with status 0
+
+- Use a signal handler that sets a flag checked in the main poll loop. Do not perform I/O in the signal handler.
+
+---
+
+## 24. Key Implementation Notes
+
+### 24.1 JID Handling
+
+Implement a JID utility module with:
+- `jid_parse(const char *s, char *local, char *domain, char *resource)` — split a JID string into its parts
+- `jid_bare(const char *local, const char *domain, char *out)` — format `local@domain`
+- `jid_full(const char *local, const char *domain, const char *resource, char *out)` — format `local@domain/resource`
+- Validation: localpart max 256 bytes, domainpart max 256 bytes, resourcepart max 256 bytes
+
+### 24.2 Stream ID Generation
+
+Generate random alphanumeric stream IDs. Use `/dev/urandom` or `rand()` seeded with `time() ^ getpid()`. Length: 16 characters.
+
+### 24.3 Thread Safety
+
+Not required. The server is **single-threaded** with asynchronous I/O via `poll()`.
+
+### 24.4 Memory Management
+
+- Session structures are allocated on connect and freed on disconnect
+- libxml2 DOM trees for stanzas are freed after dispatch
+- Write buffers grow as needed (doubling strategy) and are freed on session teardown
+- Roster data is loaded from disk on demand and cached in memory per-session; written back on modification
+
+### 24.5 XML Namespace Handling
+
+The server must correctly handle the following namespaces:
+
+| Namespace | Prefix/Usage |
+|-----------|-------------|
+| `jabber:client` | Default namespace for client streams |
+| `http://etherx.jabber.org/streams` | `stream:` prefix |
+| `urn:ietf:params:xml:ns:xmpp-sasl` | SASL stanzas |
+| `urn:ietf:params:xml:ns:xmpp-bind` | Resource binding |
+| `urn:ietf:params:xml:ns:xmpp-session` | Session establishment |
+| `urn:ietf:params:xml:ns:xmpp-stanzas` | Stanza error conditions |
+| `urn:ietf:params:xml:ns:xmpp-streams` | Stream error conditions |
+| `jabber:iq:roster` | Roster management |
+| `http://jabber.org/protocol/disco#info` | Service discovery info |
+| `http://jabber.org/protocol/disco#items` | Service discovery items |
+| `urn:xmpp:delay` | Delayed delivery timestamps |
+
+---
+
+## 25. Test Scenarios
+
+The implementation should be verified against these scenarios using Pidgin:
+
+1. **Basic login** — Pidgin connects, authenticates, binds resource, establishes session
+2. **Two-user chat** — Alice and Bob both connect; Alice sends a message to Bob; Bob receives it
+3. **Presence** — Alice logs in and sees Bob online; Alice goes away; Bob sees Alice as away
+4. **Subscription flow** — Alice adds Bob as a contact; Bob receives the request in Pidgin and approves; both see each other's presence
+5. **Offline messages** — Alice sends a message to Bob while Bob is offline; Bob logs in and receives the stored message with a delay timestamp
+6. **Conflict** — Alice logs in from a second Pidgin instance; first instance is disconnected with a conflict error
+7. **Roster removal** — Alice removes Bob from contacts; subscriptions are cancelled; both stop seeing each other's presence
+8. **Graceful shutdown** — Server receives SIGINT; all connected clients see the stream closed cleanly
+9. **Error cases** — Message to non-existent user returns error; unknown IQ namespace returns service-unavailable
+
+---
+
+## 26. Future Extension Points
+
+The architecture should make it straightforward to add in a later phase:
+
+- TLS via STARTTLS
+- SASL SCRAM-SHA-1 authentication
+- Multiple resources per user with priority-based routing
+- Multi-User Chat (XEP-0045)
+- vCards (XEP-0054)
+- Message Archive Management (XEP-0313)
+- SQLite or database-backed storage
+- Roster versioning
+- Server-to-server (s2s) federation
