@@ -1,29 +1,18 @@
-CC       = cc
-CFLAGS   = -std=c11 -Wall -Wextra -pedantic -g $(shell xml2-config --cflags)
-LDFLAGS  = $(shell xml2-config --libs)
+XMPPD   = ./xmppd
+USERADD = ./useradd
 
-SRCDIR   = src
-INCDIR   = include
-BUILDDIR = build
+all: $(XMPPD) $(USERADD)
 
-SRCS     = $(wildcard $(SRCDIR)/*.c)
-OBJS     = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRCS))
+$(XMPPD):
+	go build -o $(XMPPD) .
 
-all: xmppd useradd
+$(USERADD):
+	go build -o $(USERADD) ./cmd/useradd
 
-xmppd: $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-useradd: tools/useradd.c
-	$(CC) -std=c11 -Wall -Wextra -pedantic -g -o $@ $<
-
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) -I$(INCDIR) -c -o $@ $<
-
-$(BUILDDIR):
-	mkdir -p $(BUILDDIR)
+tests: all
+	python3 tests/run_all.py
 
 clean:
-	rm -rf $(BUILDDIR) xmppd useradd
+	rm -f $(XMPPD) $(USERADD) xmppd.log
 
-.PHONY: all clean
+.PHONY: all tests clean
