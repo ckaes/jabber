@@ -53,8 +53,8 @@ def summary():
 
 def create_user(username, password):
     """Create a user via the useradd tool."""
-    useradd = os.path.join(REPO, 'useradd')
-    datadir = os.path.join(REPO, 'data')
+    useradd = os.environ.get('USERADD_BIN', os.path.join(REPO, 'go', 'useradd'))
+    datadir = os.environ.get('XMPPD_DATA', os.path.join(REPO, 'data'))
     result = subprocess.run(
         [useradd, '-d', datadir, '-u', username, '-p', password],
         capture_output=True, text=True

@@ -1,18 +1,20 @@
-XMPPD   = ./xmppd
-USERADD = ./useradd
+# Build the default (Go) implementation
+all:
+	$(MAKE) -C go all
 
-all: $(XMPPD) $(USERADD)
+# Run integration tests against an implementation
+# Usage: make tests           → tests Go (default)
+#        make test-go         → explicit Go
+#        make test-c          → C implementation
+tests: test-go
 
-$(XMPPD):
-	go build -o $(XMPPD) .
+test-go: all
+	XMPPD_BIN=go/xmppd USERADD_BIN=go/useradd python3 tests/run_all.py
 
-$(USERADD):
-	go build -o $(USERADD) ./cmd/useradd
-
-tests: all
-	python3 tests/run_all.py
+test-c:
+	XMPPD_BIN=c/xmppd USERADD_BIN=c/useradd python3 tests/run_all.py
 
 clean:
-	rm -f $(XMPPD) $(USERADD) xmppd.log
+	$(MAKE) -C go clean
 
-.PHONY: all tests clean
+.PHONY: all tests test-go test-c clean

@@ -25,7 +25,7 @@ from tests import (test_auth, test_session, test_roster,
                    test_presence, test_message, test_disco,
                    test_registration)
 
-XMPPD    = os.path.join(REPO, 'xmppd')
+XMPPD    = os.environ.get('XMPPD_BIN', os.path.join(REPO, 'go', 'xmppd'))
 CONF     = os.path.join(REPO, 'config', 'xmppd.conf.example')
 PORT     = 5222
 

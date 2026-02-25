@@ -5,8 +5,10 @@
 .claude/
 
 # Build artifacts
-xmppd
-useradd
+go/xmppd
+go/useradd
+c/xmppd
+c/useradd
 *.o
 *.dSYM/
 
